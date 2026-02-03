@@ -431,7 +431,7 @@ For the video call feature to work correctly, your app must have permission to a
 
 ## 📄 License
 
-UdentifyVC is available under the MIT License. See the [LICENSE](LICENSE) file for more info.
+UdentifyVC is proprietary software. Copyright © 2026 Fraud.com International Ltd. All rights reserved. See the [LICENSE](LICENSE) file for more info.
 
 ## 🙏 Third-Party Licenses
 
