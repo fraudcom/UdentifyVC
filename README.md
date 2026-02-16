@@ -442,4 +442,4 @@ This project uses the following third-party libraries:
 - **Repository:** [https://github.com/livekit/client-sdk-swift](https://github.com/livekit/client-sdk-swift)
 - **Copyright:** © 2024 LiveKit, Inc.
 
-For complete third-party license information, see [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+For complete third-party license information, please refer to the respective repositories.
