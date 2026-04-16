@@ -23,7 +23,7 @@ let package = Package(
         .package(
             name: "UdentifyCommons",
             url: "https://github.com/fraudcom/UdentifyCommons.git",
-            .exact("25.4.0")
+            .exact("26.1.3")
         ),
     ],
     targets: [
