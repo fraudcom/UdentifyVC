@@ -8,6 +8,7 @@
 import UIKit
 import UdentifyCommons
 import LiveKit
+import AVFoundation
 
 // MARK: - Delegate Protocol
 
@@ -222,6 +223,9 @@ public class VCCameraController: UIViewController {
     private var localPipConstraints: [NSLayoutConstraint] = []
     private var remoteFullScreenConstraints: [NSLayoutConstraint] = []
     
+    // MARK: - Mic update
+    private var micUpdateTask: Task<Void, Never>?
+    
     // MARK: - Initializer
     public init(delegate: VCCameraControllerDelegate?,
                 serverURL: String,
@@ -230,7 +234,7 @@ public class VCCameraController: UIViewController {
                 username: String,
                 idleTimeout: Int = 100,
                 settings: VCSettings,
-                logLevel: LogLevel = .info) {
+                logLevel: UdentifyCommons.LogLevel = .info) {
         
         VCSettings.logger = LogHeader(logLevel: logLevel, txid: transactionID, os: .iOS, dateProcessStart: Date(), module: .VIDEO_CALL)
         self.currentState = .initiating
@@ -511,7 +515,6 @@ public class VCCameraController: UIViewController {
     @MainActor
     private func setParticipants() async {
         VCSettings.logger?.info(logMessage: "Setting participants...", logPeriod: .preProcess)
-        self.updateLocalMicrophoneState(toMuted: true)
         
         if room.remoteParticipants.count > 0 {
             for participant in room.remoteParticipants.values {
@@ -590,14 +593,16 @@ public class VCCameraController: UIViewController {
     }
     
     private func updateLocalMicrophoneState(toMuted muted: Bool) {
-        Task { [weak self] in
+        let previousTask = micUpdateTask
+        micUpdateTask = Task { @MainActor [weak self] in
+            await previousTask?.value
             guard let self = self else { return }
+            guard self.room.connectionState == .connected else { return }
+            
             self.isMuted = muted
             do {
-                try await room.localParticipant.setMicrophone(enabled: !isMuted)
-                await MainActor.run {
-                    self.updateMuteButtonAppearance(forMutedState: isMuted)
-                }
+                try await self.room.localParticipant.setMicrophone(enabled: !muted)
+                self.updateMuteButtonAppearance(forMutedState: muted)
             } catch {
                 VCSettings.logger?.error(logMessage: "Error toggling microphone: \(error)", logPeriod: .onProcess)
             }
@@ -738,16 +743,11 @@ extension VCCameraController: RoomDelegate {
                 removeRemoteVideoViewIfNeeded()
                 self.addWaitingScreenIfNeeded()
                 waitingScreenLabel.text = Localization.notificationLabelDefault
-                do {
-                    self.muteButton.isHidden = true
-                    self.cameraSwitchButton.isHidden = true
-                    self.localVideoView.isHidden = true
-                    try await room.localParticipant.setCamera(enabled: false)
-                    self.updateLocalMicrophoneState(toMuted: true)
-                } catch {
-                    VCSettings.logger?.error(logMessage: "Error disabling camera: \(error)", logPeriod: .onProcess)
-                    VCSettings.logger?.error(error: error, logPeriod: .onProcess)
-                }
+                self.muteButton.isHidden = true
+                self.cameraSwitchButton.isHidden = true
+                self.localVideoView.isHidden = true
+                self.isMuted = true
+                self.updateMuteButtonAppearance(forMutedState: true)
                 self.dismissController()
             case .connecting:
                 
@@ -762,6 +762,10 @@ extension VCCameraController: RoomDelegate {
                 if self.isDismissalInProgress { return }
                 currentState = .connected
                 await setParticipants()
+            case .disconnecting:
+                
+                if self.isDismissalInProgress { return }
+                VCSettings.logger?.info(logMessage: "Connection is disconnecting...", logPeriod: .onProcess)
             }
         }
     }
@@ -781,7 +785,7 @@ extension VCCameraController: RoomDelegate {
             else if participantMetadata == "supervisor" {
                 delegate?.cameraController(self, participantType: .supervisor, didChangeState: .connected)
             }
-                
+            
             remoteParticipants.append(participant)
             await setParticipants()
         }
@@ -866,21 +870,39 @@ extension VCCameraController: RoomDelegate {
         }
     }
     
-    public func room(_ room: Room, participant: RemoteParticipant?, didReceiveData data: Data, forTopic topic: String) {
-        if let _ = String(data: data, encoding: .utf8) {
-            do {
-                let decoder = JSONDecoder()
-                let signal = try decoder.decode(VideoCallSignal.self, from: data)
-                if signal.type == "TERMINATE_SESSION_SIGNAL" &&
-                    signal.targetIdentity == room.localParticipant.identity?.stringValue {
-                    DispatchQueue.main.async {
-                        self.handleSessionTermination()
-                    }
-                    return
+    public func room(_ room: Room, participant: RemoteParticipant?, didReceiveData data: Data, forTopic topic: String, encryptionType: EncryptionType) {
+        guard let _ = String(data: data, encoding: .utf8) else { return }
+        
+        do {
+            let decoder = JSONDecoder()
+            let signal = try decoder.decode(VideoCallSignal.self, from: data)
+            
+            guard signal.targetIdentity == room.localParticipant.identity?.stringValue else { return }
+            
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                
+                switch signal.type {
+                case "TERMINATE_SESSION_SIGNAL":
+                    self.handleSessionTermination()
+                case "CLIENT_MICROPHONE_MUTE_SIGNAL":
+                    self.handleRemoteMicrophoneSignal(shouldMute: true)
+                case "CLIENT_MICROPHONE_UNMUTE_SIGNAL":
+                    self.handleRemoteMicrophoneSignal(shouldMute: false)
+                case "CLIENT_CAMERA_SWITCH_BACK_SIGNAL":
+                    self.handleRemoteCameraSignal(shouldSwitchToBack: true)
+                case "CLIENT_CAMERA_SWITCH_FRONT_SIGNAL":
+                    self.handleRemoteCameraSignal(shouldSwitchToBack: false)
+                case "CLIENT_FLASH_ON_SIGNAL":
+                    self.handleRemoteFlashSignal(shouldTurnOn: true)
+                case "CLIENT_FLASH_OFF_SIGNAL":
+                    self.handleRemoteFlashSignal(shouldTurnOn: false)
+                default:
+                    VCSettings.logger?.warning(logMessage: "Unknown signal type received: \(signal.type)", logPeriod: .onProcess)
                 }
-            } catch {
-                // Handle other message types if needed.
             }
+        } catch {
+            VCSettings.logger?.error(logMessage: "Failed to decode signal: \(error)", logPeriod: .onProcess)
         }
     }
     
@@ -890,6 +912,128 @@ extension VCCameraController: RoomDelegate {
             self.postLogs("Video call has been completed.", error: nil)
             self.delegate?.cameraControllerDidEndSessionSuccessfully(self)
             self.dismissController()
+        }
+    }
+}
+
+        // MARK: - Handle Signal Helpers
+private extension VCCameraController {
+    
+    func handleRemoteMicrophoneSignal(shouldMute: Bool) {
+        let action = shouldMute ? "mute" : "unmute"
+        let responseType = shouldMute ? "CLIENT_MICROPHONE_MUTE_RESPONSE" : "CLIENT_MICROPHONE_UNMUTE_RESPONSE"
+        
+        VCSettings.logger?.info(logMessage: "Remote microphone \(action) signal received", logPeriod: .onProcess)
+        
+        if isMuted == shouldMute {
+            sendSignalResponse(type: responseType, success: true, message: "Already \(action)d")
+            return
+        }
+        
+        updateLocalMicrophoneState(toMuted: shouldMute)
+        sendSignalResponse(type: responseType, success: true)
+    }
+    
+    func handleRemoteCameraSignal(shouldSwitchToBack: Bool) {
+        let camera = shouldSwitchToBack ? "back" : "front"
+        let responseType = shouldSwitchToBack ? "CLIENT_CAMERA_SWITCH_BACK_RESPONSE" : "CLIENT_CAMERA_SWITCH_FRONT_RESPONSE"
+        
+        VCSettings.logger?.info(logMessage: "Remote camera switch to \(camera) signal received", logPeriod: .onProcess)
+        
+        if isSwitchedToRearCamera == shouldSwitchToBack {
+            sendSignalResponse(type: responseType, success: true, message: "Already using \(camera) camera")
+            return
+        }
+        
+        Task { @MainActor [weak self] in
+            guard let self = self,
+                  let publication = self.room.localParticipant.videoTracks.first,
+                  let localTrack = publication.track as? LocalVideoTrack,
+                  let capturer = localTrack.capturer as? CameraCapturer else {
+                VCSettings.logger?.warning(logMessage: "No local video track or capturer available", logPeriod: .onProcess)
+                self?.sendSignalResponse(type: responseType, success: false, message: "Camera not available")
+                return
+            }
+            
+            do {
+                try await capturer.switchCameraPosition()
+                self.isSwitchedToRearCamera = shouldSwitchToBack
+                VCSettings.logger?.info(logMessage: "Camera switched to \(camera) via remote signal", logPeriod: .onProcess)
+                self.sendSignalResponse(type: responseType, success: true)
+            } catch {
+                VCSettings.logger?.error(logMessage: "Failed to switch camera: \(error)", logPeriod: .onProcess)
+                self.sendSignalResponse(type: responseType, success: false, message: error.localizedDescription)
+            }
+        }
+    }
+    
+    func handleRemoteFlashSignal(shouldTurnOn: Bool) {
+        let state = shouldTurnOn ? "on" : "off"
+        let responseType = shouldTurnOn ? "CLIENT_FLASH_ON_RESPONSE" : "CLIENT_FLASH_OFF_RESPONSE"
+        
+        VCSettings.logger?.info(logMessage: "Remote flash \(state) signal received", logPeriod: .onProcess)
+        
+        guard let device = AVCaptureDevice.default(for: .video) else {
+            VCSettings.logger?.warning(logMessage: "No video device available", logPeriod: .onProcess)
+            sendSignalResponse(type: responseType, success: false, message: "No video device available")
+            return
+        }
+        
+        guard device.hasTorch else {
+            VCSettings.logger?.warning(logMessage: "Device does not support flash", logPeriod: .onProcess)
+            sendSignalResponse(type: responseType, success: false, message: "Device does not support flash")
+            return
+        }
+        
+        guard isSwitchedToRearCamera else {
+            VCSettings.logger?.warning(logMessage: "No flash unit available on this camera.", logPeriod: .onProcess)
+            sendSignalResponse(type: responseType, success: false, message: "No flash unit available on this camera.")
+            return
+        }
+        
+        let isCurrentlyOn = device.torchMode == .on
+        if isCurrentlyOn == shouldTurnOn {
+            sendSignalResponse(type: responseType, success: true, message: "Already \(state)")
+            return
+        }
+        
+        do {
+            try device.lockForConfiguration()
+            
+            if shouldTurnOn {
+                try device.setTorchModeOn(level: AVCaptureDevice.maxAvailableTorchLevel)
+            } else {
+                device.torchMode = .off
+            }
+            
+            device.unlockForConfiguration()
+            VCSettings.logger?.info(logMessage: "Flash turned \(state)", logPeriod: .onProcess)
+            sendSignalResponse(type: responseType, success: true)
+        } catch {
+            VCSettings.logger?.error(logMessage: "Failed to turn \(state) flash: \(error)", logPeriod: .onProcess)
+            sendSignalResponse(type: responseType, success: false, message: error.localizedDescription)
+        }
+    }
+    
+    // MARK: - VideoCall Signal Response
+    func sendSignalResponse(type: String, success: Bool, message: String? = nil) {
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            
+            let response = VideoCallSignalResponse(
+                type: type,
+                success: success,
+                message: message
+            )
+            
+            do {
+                let encoder = JSONEncoder()
+                let data = try encoder.encode(response)
+                try await self.room.localParticipant.publish(data: data, options: DataPublishOptions(reliable: true))
+                VCSettings.logger?.info(logMessage: "Signal response sent: \(type), success: \(success)", logPeriod: .onProcess)
+            } catch {
+                VCSettings.logger?.error(logMessage: "Failed to send signal response: \(error)", logPeriod: .onProcess)
+            }
         }
     }
 }

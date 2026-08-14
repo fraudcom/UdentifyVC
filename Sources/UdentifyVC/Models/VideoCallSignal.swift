@@ -11,3 +11,9 @@ struct VideoCallSignal: Codable {
     let type: String
     let targetIdentity: String
 }
+
+struct VideoCallSignalResponse: Codable {
+    let type: String
+    let success: Bool
+    let message: String?
+}
