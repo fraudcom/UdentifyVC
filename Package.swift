@@ -17,13 +17,13 @@ let package = Package(
     ],
     dependencies: [
         // Existing dependency
-        .package(url: "https://github.com/livekit/client-sdk-swift.git", .exact("2.2.1")),
+        .package(url: "https://github.com/livekit/client-sdk-swift.git", .exact("2.13.0")),
         
         // New dependency for UdentifyCommons
         .package(
             name: "UdentifyCommons",
             url: "https://github.com/fraudcom/UdentifyCommons.git",
-            .exact("26.1.3")
+            .exact("26.3.0814")
         ),
     ],
     targets: [
