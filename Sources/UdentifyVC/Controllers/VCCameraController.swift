@@ -47,6 +47,7 @@ public class VCCameraController: UIViewController {
     
     // MARK: - Properties
     public weak var delegate: VCCameraControllerDelegate?
+    private static weak var currentInstance: VCCameraController?
     
     private var activeTasks = [TaskEntry]()
     private var remoteParticipants: [RemoteParticipant] = []
@@ -250,6 +251,7 @@ public class VCCameraController: UIViewController {
         LocalizationConfiguration.bundle = settings.bundle
         
         super.init(nibName: nil, bundle: nil)
+        VCCameraController.currentInstance = self
         
         VCSettings.logger?.debug(logMessage: "Instantiating VCCameraController...", logPeriod: .preProcess)
     }
@@ -321,8 +323,6 @@ public class VCCameraController: UIViewController {
             )
         )
         NSLayoutConstraint.activate(cameraSwitchButtonConstraints)
-        
-        
     }
     
     public override func viewDidLoad() {
@@ -727,6 +727,44 @@ public class VCCameraController: UIViewController {
             VCSettings.logger?.info(logMessage: message, logPeriod: currentStage)
         }
         VCSettings.logger?.postLogs(serverURL: serverURL, error: error, webService: WebService.shared)
+    }
+}
+
+//MARK: - Cancel VideoCall
+extension VCCameraController {
+    
+    public static func cancelVideoCall(serverUrl: String,
+                                        transactionId: String,
+                                        completion: @escaping (Result<Bool, Error>) -> Void) {
+        
+        guard let activeInstance = VCCameraController.currentInstance else {
+            completion(.failure(VCError.api("No active call instance to cancel.")))
+            return
+        }
+        
+        guard let roomId = activeInstance.roomName else {
+            VCSettings.logger?.error(logMessage: "cancelVideoCall: roomId is nil, cannot cancel video call.", logPeriod: .preProcess)
+            completion(.failure(VCError.api("Room ID is missing; cannot cancel video call.")))
+            return
+        }
+        
+        let params = ["168": roomId]
+        let videoCallService = VideoCallService(baseURL: serverUrl)
+        
+        videoCallService.cancelVideoCall(transactionId: transactionId, params: params) { result in
+            switch result {
+            case .success(let success):
+                VCSettings.logger?.info(logMessage: "cancelVideoCall completed, response: \(success)", logPeriod: .postProcess)
+            case .failure(let error):
+                VCSettings.logger?.error(logMessage: "cancelVideoCall failed: \(error.localizedDescription)", logPeriod: .postProcess)
+            }
+            
+            DispatchQueue.main.async {
+                activeInstance.dismissController()
+            }
+            
+            completion(result)
+        }
     }
 }
 
